@@ -19,8 +19,9 @@ class DatabaseHelper {
     String path = join(await getDatabasesPath(), 'spend_analyzer.db');
     return await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -33,9 +34,20 @@ class DatabaseHelper {
         category TEXT,
         date TEXT NOT NULL,
         rawSms TEXT,
-        source TEXT NOT NULL
+        source TEXT NOT NULL,
+        transactionType TEXT NOT NULL
       )
     ''');
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      var tableInfo = await db.rawQuery('PRAGMA table_info(expenses)');
+      bool columnExists = tableInfo.any((col) => col['name'] == 'transactionType');
+      if (!columnExists) {
+        await db.execute("ALTER TABLE expenses ADD COLUMN transactionType TEXT NOT NULL DEFAULT 'debit'");
+      }
+    }
   }
 
   Future<int> insertTransaction(TransactionModel transaction) async {
@@ -43,12 +55,56 @@ class DatabaseHelper {
     return await db.insert('expenses', transaction.toMap());
   }
 
-  Future<List<TransactionModel>> getAllTransactions() async {
+  Future<int> updateTransaction(TransactionModel transaction) async {
     Database db = await database;
-    final List<Map<String, dynamic>> maps = await db.query('expenses', orderBy: 'date DESC');
+    return await db.update('expenses', transaction.toMap(), where: 'id = ?', whereArgs: [transaction.id]);
+  }
+
+  Future<void> deleteMultipleTransactions(List<int> ids) async {
+    Database db = await database;
+    await db.transaction((txn) async {
+      for (int id in ids) {
+        await txn.delete('expenses', where: 'id = ?', whereArgs: [id]);
+      }
+    });
+  }
+
+  Future<List<TransactionModel>> getAllTransactions(DateTime month) async {
+    Database db = await database;
+    final startOfMonth = DateTime(month.year, month.month, 1).toIso8601String();
+    final endOfMonth = DateTime(month.year, month.month + 1, 0).toIso8601String();
+
+    final List<Map<String, dynamic>> maps = await db.query(
+      'expenses',
+      orderBy: 'date DESC',
+      where: 'date >= ? AND date <= ?',
+      whereArgs: [startOfMonth, endOfMonth],
+    );
 
     return List.generate(maps.length, (i) {
       return TransactionModel.fromMap(maps[i]);
     });
+  }
+
+  Future<double> getMonthlyDebits(DateTime month) async {
+    Database db = await database;
+    final startOfMonth = DateTime(month.year, month.month, 1).toIso8601String();
+    final endOfMonth = DateTime(month.year, month.month + 1, 0).toIso8601String();
+
+    final result = await db.rawQuery(
+        "SELECT SUM(amount) as total FROM expenses WHERE transactionType = 'debit' AND date >= ? AND date <= ?",
+        [startOfMonth, endOfMonth]);
+    return (result.first['total'] as num?)?.toDouble() ?? 0.0;
+  }
+
+  Future<double> getMonthlyCredits(DateTime month) async {
+    Database db = await database;
+    final startOfMonth = DateTime(month.year, month.month, 1).toIso8601String();
+    final endOfMonth = DateTime(month.year, month.month + 1, 0).toIso8601String();
+
+    final result = await db.rawQuery(
+        "SELECT SUM(amount) as total FROM expenses WHERE transactionType = 'credit' AND date >= ? AND date <= ?",
+        [startOfMonth, endOfMonth]);
+    return (result.first['total'] as num?)?.toDouble() ?? 0.0;
   }
 }

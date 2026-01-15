@@ -6,6 +6,7 @@ class TransactionModel {
   DateTime date;
   String? rawSms;
   String source;
+  String transactionType;
 
   TransactionModel({
     this.id,
@@ -15,6 +16,7 @@ class TransactionModel {
     required this.date,
     this.rawSms,
     required this.source,
+    required this.transactionType,
   });
 
   Map<String, dynamic> toMap() {
@@ -26,6 +28,7 @@ class TransactionModel {
       'date': date.toIso8601String(),
       'rawSms': rawSms,
       'source': source,
+      'transactionType': transactionType,
     };
   }
 
@@ -38,6 +41,7 @@ class TransactionModel {
       date: DateTime.parse(map['date']),
       rawSms: map['rawSms'],
       source: map['source'],
+      transactionType: map['transactionType'],
     );
   }
 }

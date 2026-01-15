@@ -2,8 +2,21 @@ import 'package:spend_analyzer/models/transaction_model.dart';
 
 class SmsParser {
   static TransactionModel? parseSms(String sms) {
-    final keywords = ['spent', 'debited', 'paid'];
-    if (!keywords.any((keyword) => sms.toLowerCase().contains(keyword))) {
+    final debitKeywords = ['spent', 'debited', 'paid', 'deducted'];
+    final creditKeywords = ['credited', 'received', 'added', 'deposit'];
+
+    bool isDebit = debitKeywords.any((keyword) => sms.toLowerCase().contains(keyword));
+    bool isCredit = creditKeywords.any((keyword) => sms.toLowerCase().contains(keyword));
+
+    String transactionType;
+
+    if (isDebit && !isCredit) {
+      transactionType = 'debit';
+    } else if (isCredit && !isDebit) {
+      transactionType = 'credit';
+    } else {
+      // If both debit and credit keywords are present, or neither,
+      // it's ambiguous or not a relevant transaction.
       return null;
     }
 
@@ -32,13 +45,13 @@ class SmsParser {
         }
     }
 
-
     return TransactionModel(
       amount: amount,
       vendor: vendor,
       date: DateTime.now(),
       rawSms: sms,
       source: 'SMS',
+      transactionType: transactionType,
     );
   }
 }
