@@ -1,11 +1,6 @@
-import 'package:spend_analyzer/helpers/gemini_parser.dart';
 import 'package:spend_analyzer/models/transaction_model.dart';
 
 class SmsParser {
-  static Future<TransactionModel?> parseSmsWithGemini(String sms) async {
-    return GeminiParser.parseSms(sms);
-  }
-
   static TransactionModel? parseSms(String sms) {
     final debitKeywords = ['spent', 'debited', 'paid', 'deducted'];
     final creditKeywords = ['credited', 'received', 'added', 'deposit'];
