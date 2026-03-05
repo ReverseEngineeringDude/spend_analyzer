@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:spend_analyzer/helpers/database_helper.dart';
 import 'package:spend_analyzer/helpers/sms_parser.dart';
+import 'package:spend_analyzer/helpers/ai_service.dart';
 import 'package:spend_analyzer/models/transaction_model.dart';
 import 'package:another_telephony/telephony.dart';
 import 'package:pull_to_refresh/pull_to_refresh.dart';
@@ -1450,8 +1451,6 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _runAiCategorization() async {
-    // Basic implementation since actual method needs an AI service file.
-    // Normally would call AiService.categorize()
     if (_geminiApiKey.isEmpty) {
       _showSnack(
         'Please configure your Gemini API Key in Profile Settings first.',
@@ -1459,7 +1458,44 @@ class _HomeScreenState extends State<HomeScreen>
       );
       return;
     }
-    _showSnack('Running AI categorization... (Requires AiService sync)');
+
+    _showSnack('Running AI categorization... Please wait.');
+
+    try {
+      final transactions = await DatabaseHelper().getAllTransactions(
+        _selectedMonth,
+      );
+      if (transactions.isEmpty) {
+        _showSnack('No transactions to categorize for this month.');
+        return;
+      }
+
+      final aiService = AiService();
+      final categoryMap = await aiService.categorizeTransactions(transactions);
+
+      if (categoryMap.isEmpty) {
+        _showSnack('No categories updated.');
+        return;
+      }
+
+      int updateCount = 0;
+      for (var tx in transactions) {
+        // Only update if it actually categorized into a known category
+        if (categoryMap.containsKey(tx.id) && categoryMap[tx.id] != 'Others') {
+          final newCat = categoryMap[tx.id]!;
+          if (_categories.contains(newCat)) {
+            tx.category = newCat;
+            await DatabaseHelper().updateTransaction(tx);
+            updateCount++;
+          }
+        }
+      }
+
+      _showSnack('Successfully categorized $updateCount transactions!');
+      _loadAllData();
+    } catch (e) {
+      _showSnack(e.toString().replaceAll('Exception: ', ''), isError: true);
+    }
   }
 
   Widget _buildCategoryFilters() {

@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'package:google_generative_ai/google_generative_ai.dart';
-import 'package:spend_analyzer/helpers/constants.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:spend_analyzer/models/transaction_model.dart';
 
 class AiService {
@@ -8,14 +8,20 @@ class AiService {
   factory AiService() => _instance;
   AiService._internal();
 
-  final GenerativeModel _model = GenerativeModel(
-    model: 'gemini-2.5-flash',
-    apiKey: Constants.geminiApiKey,
-  );
-
   Future<Map<int, String>> categorizeTransactions(
     List<TransactionModel> transactions,
   ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final apiKey = prefs.getString('gemini_api_key') ?? '';
+
+    if (apiKey.isEmpty) {
+      throw Exception(
+        'API Key not configured. Please add it in Profile Settings.',
+      );
+    }
+
+    final model = GenerativeModel(model: 'gemini-2.5-flash', apiKey: apiKey);
+
     if (transactions.isEmpty) return {};
 
     // Prepare prompt data
@@ -50,7 +56,7 @@ class AiService {
 
     try {
       final content = [Content.text(prompt)];
-      final response = await _model.generateContent(content);
+      final response = await model.generateContent(content);
 
       if (response.text == null || response.text!.isEmpty) {
         throw Exception("Empty response from Gemini.");
