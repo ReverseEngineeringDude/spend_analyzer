@@ -5,8 +5,12 @@ class SmsParser {
     final debitKeywords = ['spent', 'debited', 'paid', 'deducted'];
     final creditKeywords = ['credited', 'received', 'added', 'deposit'];
 
-    bool isDebit = debitKeywords.any((keyword) => sms.toLowerCase().contains(keyword));
-    bool isCredit = creditKeywords.any((keyword) => sms.toLowerCase().contains(keyword));
+    bool isDebit = debitKeywords.any(
+      (keyword) => sms.toLowerCase().contains(keyword),
+    );
+    bool isCredit = creditKeywords.any(
+      (keyword) => sms.toLowerCase().contains(keyword),
+    );
 
     String transactionType;
 
@@ -21,8 +25,21 @@ class SmsParser {
     }
 
     // Regex to find amount (handles integers and decimals)
-    final amountRegex = RegExp(r'(?:rs|inr|\$|eur|£)\.?\s*([\d,]+\.?\d*)', caseSensitive: false);
-    final amountMatch = amountRegex.firstMatch(sms);
+    final amountRegex = RegExp(
+      r'(?:rs\.?|inr|\$|eur|£)\s*([\d,]+\.?\d*)',
+      caseSensitive: false,
+    );
+    var amountMatch = amountRegex.firstMatch(sms);
+
+    // Fallback for direct "debited by [amount]" or "spent [amount]"
+    if (amountMatch == null) {
+      final amountRegexFallback = RegExp(
+        r'(?:debited by|spent|paid)\s+([\d,]+\.?\d*)',
+        caseSensitive: false,
+      );
+      amountMatch = amountRegexFallback.firstMatch(sms);
+    }
+
     double? amount;
     if (amountMatch != null) {
       amount = double.tryParse(amountMatch.group(1)!.replaceAll(',', ''));
@@ -31,18 +48,37 @@ class SmsParser {
     if (amount == null) return null;
 
     // Regex to find vendor
-    // This is a simple example, a more robust solution would be needed for real-world scenarios
-    final vendorRegex = RegExp(r'(?:at|to|on)\s+([a-z0-9\s]+)(?:\s+on|\s+at)', caseSensitive: false);
-    final vendorMatch = vendorRegex.firstMatch(sms);
     String vendor = 'Unknown';
-    if (vendorMatch != null) {
-      vendor = vendorMatch.group(1)!.trim();
+
+    // Pattern 1: paid/sent/trf to [Vendor]
+    final vendorRegexTo = RegExp(
+      r'(?:paid to|sent to|trf to|to)\s+([A-Za-z0-9\s]+?)(?:\s+on|\s+ref|\s+upi|\s+at|\.|$)',
+      caseSensitive: false,
+    );
+    final vendorMatchTo = vendorRegexTo.firstMatch(sms);
+
+    if (vendorMatchTo != null) {
+      vendor = vendorMatchTo.group(1)!.trim();
     } else {
-        final vendorRegex2 = RegExp(r'by\s+([a-z0-9\s]+)(?:\s+on)', caseSensitive: false);
-        final vendorMatch2 = vendorRegex2.firstMatch(sms);
-        if (vendorMatch2 != null) {
-            vendor = vendorMatch2.group(1)!.trim();
+      // Pattern 2: at/on [Vendor]
+      final vendorRegexAt = RegExp(
+        r'(?:at|on)\s+([A-Za-z0-9\s]+?)(?:\s+on|\s+at|\.|$)',
+        caseSensitive: false,
+      );
+      final vendorMatchAt = vendorRegexAt.firstMatch(sms);
+      if (vendorMatchAt != null) {
+        vendor = vendorMatchAt.group(1)!.trim();
+      } else {
+        // Pattern 3: by [Vendor]
+        final vendorRegexBy = RegExp(
+          r'by\s+([A-Za-z0-9\s]+?)(?:\s+on|\.|$)',
+          caseSensitive: false,
+        );
+        final vendorMatchBy = vendorRegexBy.firstMatch(sms);
+        if (vendorMatchBy != null) {
+          vendor = vendorMatchBy.group(1)!.trim();
         }
+      }
     }
 
     return TransactionModel(

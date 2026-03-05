@@ -7,6 +7,8 @@ import 'package:spend_analyzer/helpers/sms_parser.dart';
 import 'package:spend_analyzer/models/transaction_model.dart';
 import 'package:another_telephony/telephony.dart';
 import 'package:pull_to_refresh/pull_to_refresh.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:spend_analyzer/helpers/ai_service.dart';
 
 @pragma('vm:entry-point')
 Future<void> onBackgroundMessage(SmsMessage message) async {
@@ -30,9 +32,22 @@ class _HomeScreenState extends State<HomeScreen> {
   double _monthlyCredits = 0.0;
   bool _isSelectionMode = false;
   final Set<int> _selectedTransactions = {};
-  final RefreshController _refreshController =
-      RefreshController(initialRefresh: false);
+  final RefreshController _refreshController = RefreshController(
+    initialRefresh: false,
+  );
   DateTime _selectedMonth = DateTime.now();
+  String _selectedCategory = 'All';
+  bool _isCategorizing = false;
+  final List<String> _categories = [
+    'All',
+    'Shopping',
+    'Bills',
+    'Transport',
+    'Food',
+    'Entertainment',
+    'Health',
+    'Others',
+  ];
 
   // Theme Constants - Refined for a modern "Slate & Indigo" look
   final Color primaryDark = const Color(0xFF0F172A);
@@ -45,10 +60,109 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _loadAllData();
     _initTelephony();
+    _checkFirstStartSmsSync();
+  }
+
+  void _checkFirstStartSmsSync() async {
+    final prefs = await SharedPreferences.getInstance();
+    bool hasSynced = prefs.getBool('has_synced_first_start_sms') ?? false;
+    if (!hasSynced) {
+      await _importSmsForMonth(DateTime.now());
+      await prefs.setBool('has_synced_first_start_sms', true);
+    }
+  }
+
+  Future<void> _importSmsForMonth(DateTime targetMonth) async {
+    final permissionsGranted = await telephony.requestPhoneAndSmsPermissions;
+    if (!(permissionsGranted ?? false)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('SMS Permissions denied by device.')),
+        );
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Syncing SMS for ${DateFormat('MMM yyyy').format(targetMonth)}...',
+        ),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+
+    try {
+      List<SmsMessage> messages = await telephony.getInboxSms(
+        columns: [SmsColumn.BODY, SmsColumn.DATE],
+        sortOrder: [OrderBy(SmsColumn.DATE, sort: Sort.DESC)],
+      );
+
+      if (messages.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No SMS messages found in Inbox.')),
+          );
+        }
+        return;
+      }
+
+      final existingTxs = await DatabaseHelper().getAllTransactions(
+        targetMonth,
+      );
+      final existingSignatures = existingTxs
+          .map((t) => '${t.rawSms}_${t.date.millisecondsSinceEpoch}')
+          .toSet();
+      int importedCount = 0;
+
+      for (var message in messages) {
+        if (message.date == null) continue;
+        final date = DateTime.fromMillisecondsSinceEpoch(message.date!);
+        if (date.year == targetMonth.year && date.month == targetMonth.month) {
+          final sig = '${message.body}_${date.millisecondsSinceEpoch}';
+          if (existingSignatures.contains(sig)) continue;
+
+          final transaction = SmsParser.parseSms(message.body ?? "");
+          if (transaction != null) {
+            final txWithDate = TransactionModel(
+              id: transaction.id,
+              amount: transaction.amount,
+              vendor: transaction.vendor,
+              category: transaction.category,
+              date: date,
+              rawSms: transaction.rawSms,
+              source: transaction.source,
+              transactionType: transaction.transactionType,
+            );
+            await DatabaseHelper().insertTransaction(txWithDate);
+            existingSignatures.add(sig);
+            importedCount++;
+          }
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Synced $importedCount new transactions.')),
+        );
+        _loadAllData();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('SMS Sync Error: $e'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
   }
 
   void _onRefresh() async {
-    _loadAllData();
+    await _importSmsForMonth(_selectedMonth);
     _refreshController.refreshCompleted();
   }
 
@@ -59,7 +173,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _changeMonth(int month) {
     setState(() {
-      _selectedMonth = DateTime(_selectedMonth.year, _selectedMonth.month + month);
+      _selectedMonth = DateTime(
+        _selectedMonth.year,
+        _selectedMonth.month + month,
+      );
       _loadAllData();
     });
   }
@@ -94,34 +211,71 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _loadTransactions() {
     setState(() {
-      _transactionsFuture = DatabaseHelper().getAllTransactions(_selectedMonth);
+      _transactionsFuture = DatabaseHelper()
+          .getAllTransactions(_selectedMonth)
+          .then((transactions) {
+            if (_selectedCategory == 'All') {
+              return transactions;
+            } else {
+              return transactions
+                  .where((tx) => tx.category == _selectedCategory)
+                  .toList();
+            }
+          });
     });
   }
 
-  void _importSms() async {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Syncing transactions from SMS inbox...'),
-        duration: Duration(seconds: 1),
-        behavior: SnackBarBehavior.floating,
-      ),
+  Future<void> _categorizeTransactions() async {
+    final allTransactions = await DatabaseHelper().getAllTransactions(
+      _selectedMonth,
     );
+    // Only categorize debit transactions that don't have a specific category yet
+    final uncategorized = allTransactions
+        .where((t) => t.category == null && t.transactionType == 'debit')
+        .toList();
 
-    List<SmsMessage> messages = await telephony.getInboxSms(
-      columns: [SmsColumn.BODY, SmsColumn.DATE],
-      sortOrder: [OrderBy(SmsColumn.DATE, sort: Sort.DESC)],
-    );
-
-    for (var message in messages) {
-      final transaction = SmsParser.parseSms(message.body ?? "");
-      if (transaction != null) {
-        await DatabaseHelper().insertTransaction(transaction);
-      }
+    if (uncategorized.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('All expenses are already categorized for this month!'),
+        ),
+      );
+      return;
     }
 
-    if (mounted) {
-      _loadAllData();
+    setState(() {
+      _isCategorizing = true;
+    });
+
+    try {
+      final categoryMap = await AiService().categorizeTransactions(
+        uncategorized,
+      );
+      await DatabaseHelper().updateTransactionCategories(categoryMap);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Successfully auto-categorized ${categoryMap.length} expenses!',
+            ),
+          ),
+        );
+        _loadAllData();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to categorize: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCategorizing = false;
+        });
+      }
     }
   }
 
@@ -136,13 +290,12 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Column(
         children: [
           _buildHeroHeader(),
+          _buildCategoryFilters(),
           Expanded(
             child: SmartRefresher(
               controller: _refreshController,
               onRefresh: _onRefresh,
-              header: const WaterDropHeader(
-                waterDropColor: Color(0xFF6366F1),
-              ),
+              header: const WaterDropHeader(waterDropColor: Color(0xFF6366F1)),
               child: FutureBuilder<List<TransactionModel>>(
                 future: _transactionsFuture,
                 builder: (context, snapshot) {
@@ -203,7 +356,32 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      actions: const [],
+      actions: [
+        if (_isCategorizing)
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 20.0),
+            child: SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                color: Colors.white,
+                strokeWidth: 2,
+              ),
+            ),
+          )
+        else
+          TextButton.icon(
+            onPressed: _categorizeTransactions,
+            icon: const Icon(Icons.auto_awesome, color: Colors.amber, size: 20),
+            label: const Text(
+              "AI Categorize",
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -268,7 +446,7 @@ class _HomeScreenState extends State<HomeScreen> {
             color: primaryDark.withValues(alpha: 0.3),
             blurRadius: 20,
             offset: const Offset(0, 10),
-          )
+          ),
         ],
       ),
       child: Column(
@@ -289,7 +467,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: accentIndigo.withValues(alpha: 0.4),
                   blurRadius: 15,
                   offset: const Offset(0, 8),
-                )
+                ),
               ],
             ),
             child: Column(
@@ -302,7 +480,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       "Current Balance",
                       style: TextStyle(color: Colors.white70, fontSize: 14),
                     ),
-                    Icon(Icons.account_balance_wallet_rounded, color: Colors.white30),
+                    Icon(
+                      Icons.account_balance_wallet_rounded,
+                      color: Colors.white30,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 8),
@@ -318,17 +499,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   children: [
                     _buildQuickStat(
-                      "Income", 
-                      _monthlyCredits, 
-                      Icons.south_west_rounded, 
-                      const Color(0xFF34D399)
+                      "Income",
+                      _monthlyCredits,
+                      Icons.south_west_rounded,
+                      const Color(0xFF34D399),
                     ),
                     const SizedBox(width: 20),
                     _buildQuickStat(
-                      "Expense", 
-                      _monthlyDebits, 
-                      Icons.north_east_rounded, 
-                      const Color(0xFFFB7185)
+                      "Expense",
+                      _monthlyDebits,
+                      Icons.north_east_rounded,
+                      const Color(0xFFFB7185),
                     ),
                   ],
                 ),
@@ -340,12 +521,61 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildCategoryFilters() {
+    return Container(
+      height: 60,
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        itemCount: _categories.length,
+        itemBuilder: (context, index) {
+          final category = _categories[index];
+          final isSelected = _selectedCategory == category;
+          return Padding(
+            padding: const EdgeInsets.only(right: 8.0),
+            child: ChoiceChip(
+              label: Text(category),
+              selected: isSelected,
+              onSelected: (selected) {
+                if (selected) {
+                  setState(() {
+                    _selectedCategory = category;
+                    _loadTransactions();
+                  });
+                }
+              },
+              backgroundColor: Colors.white,
+              selectedColor: accentIndigo.withValues(alpha: 0.1),
+              labelStyle: TextStyle(
+                color: isSelected ? accentIndigo : Colors.grey[600],
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+                side: BorderSide(
+                  color: isSelected
+                      ? accentIndigo
+                      : Colors.grey.withValues(alpha: 0.2),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildMonthSelector() {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white54, size: 20),
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: Colors.white54,
+            size: 20,
+          ),
           onPressed: () => _changeMonth(-1),
         ),
         Text(
@@ -357,14 +587,23 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         IconButton(
-          icon: const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white54, size: 20),
+          icon: const Icon(
+            Icons.arrow_forward_ios_rounded,
+            color: Colors.white54,
+            size: 20,
+          ),
           onPressed: () => _changeMonth(1),
         ),
       ],
     );
   }
 
-  Widget _buildQuickStat(String label, double amount, IconData icon, Color color) {
+  Widget _buildQuickStat(
+    String label,
+    double amount,
+    IconData icon,
+    Color color,
+  ) {
     return Expanded(
       child: Row(
         children: [
@@ -381,10 +620,17 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(label, style: const TextStyle(color: Colors.white60, fontSize: 11)),
+                Text(
+                  label,
+                  style: const TextStyle(color: Colors.white60, fontSize: 11),
+                ),
                 Text(
                   "₹${amount.toStringAsFixed(0)}",
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
               ],
@@ -405,7 +651,11 @@ class _HomeScreenState extends State<HomeScreen> {
       icon: const Icon(Icons.add_rounded, color: Colors.white, size: 28),
       label: const Text(
         "New Entry",
-        style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, letterSpacing: 0.5),
+        style: TextStyle(
+          fontWeight: FontWeight.bold,
+          color: Colors.white,
+          letterSpacing: 0.5,
+        ),
       ),
     );
   }
@@ -433,7 +683,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // State Builders
-  Widget _buildLoadingState() => const Center(child: CircularProgressIndicator());
+  Widget _buildLoadingState() =>
+      const Center(child: CircularProgressIndicator());
   Widget _buildEmptyState() => Center(
     child: Column(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -442,7 +693,10 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(height: 16),
         Text(
           "No transactions recorded",
-          style: TextStyle(color: Colors.grey[500], fontWeight: FontWeight.w500),
+          style: TextStyle(
+            color: Colors.grey[500],
+            fontWeight: FontWeight.w500,
+          ),
         ),
       ],
     ),
@@ -476,7 +730,9 @@ class _HomeScreenState extends State<HomeScreen> {
               backgroundColor: Colors.redAccent,
               foregroundColor: Colors.white,
               elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
             onPressed: () async {
               await DatabaseHelper().deleteMultipleTransactions(
@@ -510,7 +766,9 @@ class _HomeScreenState extends State<HomeScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(28),
+              ),
               title: Text(
                 transaction == null ? 'Add Transaction' : 'Edit Details',
                 style: const TextStyle(fontWeight: FontWeight.bold),
@@ -579,15 +837,23 @@ class _HomeScreenState extends State<HomeScreen> {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  child: Text('Cancel', style: TextStyle(color: Colors.grey[600])),
+                  child: Text(
+                    'Cancel',
+                    style: TextStyle(color: Colors.grey[600]),
+                  ),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: accentIndigo,
                     foregroundColor: Colors.white,
                     elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24,
+                      vertical: 12,
+                    ),
                   ),
                   onPressed: () async {
                     final amount = double.tryParse(amountController.text);
@@ -596,7 +862,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     if (amount == null || vendor.isEmpty) {
                       if (!mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please fill all fields.')),
+                        const SnackBar(
+                          content: Text('Please fill all fields.'),
+                        ),
                       );
                       return;
                     }
@@ -610,7 +878,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           source: 'Manual',
                           transactionType: transactionType,
                         );
-                        await DatabaseHelper().insertTransaction(newTransaction);
+                        await DatabaseHelper().insertTransaction(
+                          newTransaction,
+                        );
                       } else {
                         final updatedTransaction = TransactionModel(
                           id: transaction.id,
@@ -622,7 +892,9 @@ class _HomeScreenState extends State<HomeScreen> {
                           category: transaction.category,
                           transactionType: transactionType,
                         );
-                        await DatabaseHelper().updateTransaction(updatedTransaction);
+                        await DatabaseHelper().updateTransaction(
+                          updatedTransaction,
+                        );
                       }
                       if (!mounted) return;
                       Navigator.of(context).pop();
@@ -663,7 +935,9 @@ class _ModernTransactionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bool isDebit = transaction.transactionType == 'debit';
-    final Color statusColor = isDebit ? const Color(0xFFF43F5E) : const Color(0xFF10B981);
+    final Color statusColor = isDebit
+        ? const Color(0xFFF43F5E)
+        : const Color(0xFF10B981);
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 250),
@@ -710,18 +984,52 @@ class _ModernTransactionCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 4),
-                      Row(
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 8,
+                        runSpacing: 4,
                         children: [
-                          Icon(
-                            transaction.source == 'SMS' ? Icons.sms_outlined : Icons.edit_note_rounded,
-                            size: 12,
-                            color: Colors.grey[400],
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                transaction.source == 'SMS'
+                                    ? Icons.sms_outlined
+                                    : Icons.edit_note_rounded,
+                                size: 12,
+                                color: Colors.grey[400],
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                DateFormat(
+                                  'MMM dd • hh:mm a',
+                                ).format(transaction.date),
+                                style: TextStyle(
+                                  color: Colors.grey[500],
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
                           ),
-                          const SizedBox(width: 4),
-                          Text(
-                            DateFormat('MMM dd • hh:mm a').format(transaction.date),
-                            style: TextStyle(color: Colors.grey[500], fontSize: 12),
-                          ),
+                          if (transaction.category != null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF1F5F9),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                transaction.category!,
+                                style: const TextStyle(
+                                  color: Color(0xFF64748B),
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ],
@@ -746,8 +1054,12 @@ class _ModernTransactionCard extends StatelessWidget {
                     scale: isSelected ? 1.1 : 1.0,
                     duration: const Duration(milliseconds: 200),
                     child: Icon(
-                      isSelected ? Icons.check_circle_rounded : Icons.radio_button_off_rounded,
-                      color: isSelected ? const Color(0xFF6366F1) : Colors.grey[300],
+                      isSelected
+                          ? Icons.check_circle_rounded
+                          : Icons.radio_button_off_rounded,
+                      color: isSelected
+                          ? const Color(0xFF6366F1)
+                          : Colors.grey[300],
                     ),
                   ),
                 ],
