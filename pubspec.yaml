@@ -42,6 +42,7 @@ dependencies:
   pull_to_refresh: ^2.0.0
   shared_preferences: ^2.5.4
   google_generative_ai: ^0.4.7
+  fl_chart: ^1.1.1
 
 dev_dependencies:
   flutter_test:
