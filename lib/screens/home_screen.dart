@@ -30,6 +30,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
   late Future<List<TransactionModel>> _transactionsFuture;
+  late Future<List<TransactionModel>> _allTransactionsFuture;
   final Telephony telephony = Telephony.instance;
 
   bool _isSelectionMode = false;
@@ -313,17 +314,17 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _loadTransactions() {
     setState(() {
-      _transactionsFuture = DatabaseHelper()
-          .getAllTransactions(_selectedMonth)
-          .then((transactions) {
-            if (_selectedCategory == 'All') {
-              return transactions;
-            } else {
-              return transactions
-                  .where((tx) => tx.category == _selectedCategory)
-                  .toList();
-            }
-          });
+      final allTx = DatabaseHelper().getAllTransactions(_selectedMonth);
+      _allTransactionsFuture = allTx;
+      _transactionsFuture = allTx.then((transactions) {
+        if (_selectedCategory == 'All') {
+          return transactions;
+        } else {
+          return transactions
+              .where((tx) => tx.category == _selectedCategory)
+              .toList();
+        }
+      });
     });
   }
 
@@ -485,7 +486,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildSummaryHeroCard() {
     return FutureBuilder<List<TransactionModel>>(
-      future: _transactionsFuture,
+      future: _allTransactionsFuture,
       builder: (context, snapshot) {
         final txs = snapshot.data ?? [];
         double totalDebits = 0;
@@ -495,7 +496,7 @@ class _HomeScreenState extends State<HomeScreen>
         final dailyCounts = <int, int>{};
 
         for (var tx in txs) {
-          if (tx.transactionType == 'SPEND') {
+          if (tx.transactionType == 'debit') {
             totalDebits += tx.amount;
           } else {
             totalCredits += tx.amount;
@@ -562,7 +563,13 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  "₹${NumberFormat('#,##,###.##').format(balance.abs())}",
+                  NumberFormat.currency(
+                    locale: 'en_IN',
+                    symbol: '₹',
+                    decimalDigits: balance.truncateToDouble() == balance
+                        ? 0
+                        : 2,
+                  ).format(balance.abs()),
                   style: TextStyle(
                     color: isSurplus ? accentGreen : textPrimary,
                     fontSize: 44,
@@ -627,7 +634,11 @@ class _HomeScreenState extends State<HomeScreen>
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                "₹${NumberFormat('#,##,0').format(totalCredits)}",
+                                NumberFormat.currency(
+                                  locale: 'en_IN',
+                                  symbol: '₹',
+                                  decimalDigits: 0,
+                                ).format(totalCredits),
                                 style: TextStyle(
                                   color: textPrimary,
                                   fontSize: 14,
@@ -645,7 +656,11 @@ class _HomeScreenState extends State<HomeScreen>
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                "₹${NumberFormat('#,##,0').format(totalDebits)}",
+                                NumberFormat.currency(
+                                  locale: 'en_IN',
+                                  symbol: '₹',
+                                  decimalDigits: 0,
+                                ).format(totalDebits),
                                 style: TextStyle(
                                   color: textPrimary,
                                   fontSize: 14,
@@ -669,7 +684,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildMonthlyProfitsCard() {
     return FutureBuilder<List<TransactionModel>>(
-      future: _transactionsFuture,
+      future: _allTransactionsFuture,
       builder: (context, snapshot) {
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
           return _buildStaticMonthlyProfitsCard([], 0);
@@ -680,7 +695,7 @@ class _HomeScreenState extends State<HomeScreen>
         double totalSpend = 0;
 
         for (var tx in txs) {
-          if (tx.transactionType == 'SPEND') {
+          if (tx.transactionType == 'debit') {
             final String cat = tx.category ?? 'Others';
             categoryTotals[cat] = (categoryTotals[cat] ?? 0) + tx.amount;
             totalSpend += tx.amount;
@@ -868,7 +883,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildWeeklyActivityCard() {
     return FutureBuilder<List<TransactionModel>>(
-      future: _transactionsFuture,
+      future: _allTransactionsFuture,
       builder: (context, snapshot) {
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
           return _buildStaticWeeklyActivityCard({}, 0);
@@ -878,7 +893,7 @@ class _HomeScreenState extends State<HomeScreen>
         final dailyTotals = <int, double>{};
         double totalDebits = 0;
         for (var tx in snapshot.data!) {
-          if (tx.transactionType == 'SPEND') {
+          if (tx.transactionType == 'debit') {
             int dayIndex = tx.date.weekday - 1;
             dailyTotals[dayIndex] = (dailyTotals[dayIndex] ?? 0) + tx.amount;
             totalDebits += tx.amount;
@@ -971,7 +986,11 @@ class _HomeScreenState extends State<HomeScreen>
                 ],
               ),
               Text(
-                "₹${NumberFormat('#,##,0').format(totalDebits)}",
+                NumberFormat.currency(
+                  locale: 'en_IN',
+                  symbol: '₹',
+                  decimalDigits: 0,
+                ).format(totalDebits),
                 style: TextStyle(
                   color: textPrimary,
                   fontSize: 18,
@@ -2173,7 +2192,7 @@ class _ModernTransactionCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      "${isDebit ? '−' : ''}₹${NumberFormat('#,##,0').format(transaction.amount)}",
+                      "${isDebit ? '−' : ''}${NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: transaction.amount.truncateToDouble() == transaction.amount ? 0 : 2).format(transaction.amount)}",
                       style: TextStyle(
                         fontWeight: FontWeight.w700,
                         fontSize: 15,
